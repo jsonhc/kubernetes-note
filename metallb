@@ -1,1 +1,122 @@
 ## install ingress on kubernetes
+安装ingress：https://kubernetes.github.io/ingress-nginx/deploy/
+wget https://raw.githubusercontent.com/kubernetes/ingress-nginx/controller-v1.10.1/deploy/static/provider/aws/deploy.yaml
+如果镜像下载失败，进行镜像替换：
+[root@node3 ~]# grep "image" deploy.yaml
+        image: registry.cn-hangzhou.aliyuncs.com/google_containers/nginx-ingress-controller:v1.6.3@sha256:b92667e0afde1103b736e6a3f00dd75ae66eec4e71827d19f19f471699e909d2
+        imagePullPolicy: IfNotPresent
+        image: registry.cn-hangzhou.aliyuncs.com/google_containers/kube-webhook-certgen:v20220916-gd32f8c343@sha256:39c5b2e3310dc4264d638ad28d9d1d96c4cbb2b2dcfb52368fe4e3c63f61e10f
+        imagePullPolicy: IfNotPresent
+        image: registry.cn-hangzhou.aliyuncs.com/google_containers/kube-webhook-certgen:v20220916-gd32f8c343@sha256:39c5b2e3310dc4264d638ad28d9d1d96c4cbb2b2dcfb52368fe4e3c63f61e10f
+        imagePullPolicy: IfNotPresent
+
+## install metallb on kubernetes
+kubectl edit configmap -n kube-system kube-proxy将mode: "ipvs"改为这个
+kubectl create namespace metallb-system
+下载：https://gitcode.com/gh_mirrors/me/metallb/blob/main/config/manifests/metallb-native.yaml?utm_source=csdn_github_accelerator&isLogin=1
+kubectl apply -f metallb-native.yaml
+
+配置 MetalLB 为Layer2模式，并配置ip池：
+[root@master metallb]# cat iptool.yaml
+apiVersion: metallb.io/v1beta1
+kind: IPAddressPool
+metadata:
+  name: default
+  namespace: metallb-system
+spec:
+  addresses:
+  - 192.168.213.200-192.168.213.255  # 手动配置IP范围
+  autoAssign: true
+---
+apiVersion: metallb.io/v1beta1
+kind: L2Advertisement
+metadata:
+  name: default
+  namespace: metallb-system
+spec:
+  ipAddressPools:
+  - default
+
+上面adresses要根据你自身ip设置，这里k8s节点ip：192.168.213.110-112三台
+然后创建一个test应用：
+[root@master metallb]# cat test_service.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nginx-metallb-test
+  namespace: metallb-system
+spec:
+  selector:
+    matchLabels:
+      app: nginx-metallb-test
+  template:
+    metadata:
+      labels:
+        app: nginx-metallb-test
+    spec:
+      containers:
+      - name: nginx
+        image: registry.cn-hangzhou.aliyuncs.com/jsonhc/nginx:1.15
+        ports:
+        - name: http
+          containerPort: 80
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: nginx-service
+  namespace: metallb-system
+spec:
+  ports:
+  - name: http
+    port: 80
+    protocol: TCP
+    targetPort: 80
+  selector:
+    app: nginx-metallb-test
+  type: LoadBalancer
+
+[root@master metallb]# kubectl get svc -n metallb-system
+NAME                      TYPE           CLUSTER-IP      EXTERNAL-IP       PORT(S)        AGE
+metallb-webhook-service   ClusterIP      10.96.59.183    <none>            443/TCP        3h35m
+nginx-service             LoadBalancer   10.96.115.116   192.168.213.201   80:31666/TCP   3h30m
+
+[root@master metallb]# kubectl get svc -n ingress-nginx
+NAME                                 TYPE           CLUSTER-IP      EXTERNAL-IP       PORT(S)                      AGE
+ingress-nginx-controller             LoadBalancer   10.96.243.111   192.168.213.200   80:32577/TCP,443:30513/TCP   13d
+ingress-nginx-controller-admission   ClusterIP      10.96.137.176   <none>            443/TCP                      13d
+
+最后创建ingress：
+[root@master metallb]# cat test_ingress.yaml
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: ingress-test
+  namespace: metallb-system
+spec:
+  ingressClassName: nginx
+  rules:
+  - host: "test.collearn.cn"
+    http:
+      paths:
+      - pathType: Prefix
+        path: "/"
+        backend:
+          service:
+            name: nginx-service
+            port:
+              number: 80
+
+当没有ingressClassName: nginx这个定义时，会有如下报错：kubectl logs -f ingress-nginx-controller-b668b4d95-9qszj -n ingress-nginx
+I1222 13:07:58.345803       7 store.go:430] "Ignoring ingress because of error while validating ingress class" ingress="metallb-system/ingress-test" error="ingress does not contain a valid IngressClass"
+
+
+成功如下：
+[root@master metallb]# kubectl get ingress -A
+NAMESPACE        NAME           CLASS   HOSTS              ADDRESS           PORTS   AGE
+metallb-system   ingress-test   nginx   test.collearn.cn   192.168.213.200   80      129m
+
+测试，将win本地hosts进行设置：
+192.168.213.200    test.collearn.cn
+
+然后浏览器访问：
